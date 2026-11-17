@@ -5,8 +5,8 @@ const firebaseConfig = {
   projectId: "kitchen-app-8ab79",
   storageBucket: "kitchen-app-8ab79.firebasestorage.app",
   messagingSenderId: "610956700538",
-  appId: "1:610956700538:web:e356316c6ee5a9ca3c44c3",
-  measurementId: "G-6PR2V1ZD1E",
+  appId: "1:610956700538:web:acb2b829ca09c40d3c44c3",
+  measurementId: "G-6E49NVYYTQ"
 };
 
 firebase.initializeApp(firebaseConfig);
