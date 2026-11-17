@@ -15,7 +15,7 @@ const db = firebase.firestore();
 /* ================= НАСТРОЙКИ ПРИЛОЖЕНИЯ ================= */
 const QR_ENTRANCE = "KITCHEN_DOOR_IN";
 const QR_EXIT = "KITCHEN_DOOR_OUT";
-const ADMIN_PASS = "admin123";
+const ADMIN_PASS = "admin321";
 
 const LS_SESSION = "kitchen_session_v1";
 const SS_ADMIN = "kitchen_admin_open_v1";
