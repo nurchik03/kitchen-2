@@ -6,7 +6,7 @@ const firebaseConfig = {
   storageBucket: "kitchen-2-566a4.firebasestorage.app",
   messagingSenderId: "1025958925236",
   appId: "1:1025958925236:web:13b9c3b10adbcea3b218e1",
-  measurementId: "G-M3NK5648H9",
+  measurementId: "G-M3NK5648H9"
 };
 
 firebase.initializeApp(firebaseConfig);
@@ -17,79 +17,33 @@ const QR_ENTRANCE = "KITCHEN_DOOR_IN";
 const QR_EXIT = "KITCHEN_DOOR_OUT";
 const ADMIN_PASS = "admin123";
 
-const LS_SESSION_LEGACY = "kitchen_session_v1";
-const LS_SESSION = `kitchen_session_v2:${firebaseConfig.projectId}`;
+const LS_SESSION = "kitchen_session_v1";
 const SS_ADMIN = "kitchen_admin_open_v1";
 const SS_ACTIVE_TAB = "kitchen_active_tab_v1";
 const COOLDOWN_MS = 8000;
 
 let employeesCache = [];
-let employeesReady = false;
-let employeesLoadFailed = false;
-let registeredEmployee = null;
 let logsCache = [];
 let announcementsCache = [];
 let adminOpen = sessionStorage.getItem(SS_ADMIN) === "true";
-let employeeSession = readEmployeeSession();
 
 /* ================= РАБОТА С СЕССИЕЙ ================= */
-function readEmployeeSession() {
-  for (const key of [LS_SESSION, LS_SESSION_LEGACY]) {
-    for (const storage of ["sessionStorage", "localStorage"]) {
-      try {
-        const value = window[storage].getItem(key);
-        if (value === null) continue;
-        const session = JSON.parse(value);
-        if (session === null && key === LS_SESSION) return null;
-        if (typeof session?.name === "string" && session.name) {
-          return { ...session, legacy: key === LS_SESSION_LEGACY };
-        }
-      } catch {
-        // Try the other storage if this one is unavailable.
-      }
-    }
-  }
-  return null;
-}
-
-function persistEmployeeSession() {
-  const value = JSON.stringify(employeeSession);
+function getSession() {
   try {
-    localStorage.setItem(LS_SESSION, value);
+    return JSON.parse(localStorage.getItem(LS_SESSION));
   } catch {
-    try {
-      sessionStorage.setItem(LS_SESSION, value);
-    } catch {
-      // The confirmed employee can still use the app in this tab.
-    }
-    return;
-  }
-  try {
-    sessionStorage.removeItem(LS_SESSION);
-  } catch {
-    // The session is already saved in localStorage.
+    return null;
   }
 }
-
-function setSession(employee) {
-  employeeSession = { id: employee.id, name: employee.name };
-  persistEmployeeSession();
+function setSession(name) {
+  localStorage.setItem(LS_SESSION, JSON.stringify({ name }));
 }
-
 function clearSession() {
-  employeeSession = null;
-  registeredEmployee = null;
-  // Remember that this site no longer has a session, even if an old shared key remains.
-  persistEmployeeSession();
+  localStorage.removeItem(LS_SESSION);
 }
-
 function currentUser() {
-  if (!employeeSession) return null;
-  const { id, name } = employeeSession;
-  const user = employeesCache.find((employee) =>
-    id ? employee.id === id : employee.name === name,
-  );
-  return user ?? (registeredEmployee?.id === id ? registeredEmployee : null);
+  const s = getSession();
+  return s ? employeesCache.find((e) => e.name === s.name) || null : null;
 }
 
 /* ================= УТИЛИТЫ ================= */
@@ -144,36 +98,16 @@ function calculateEmployeeHours(empName, targetDateStr) {
 }
 
 /* ================= СИНХРОНИЗАЦИЯ С ОБЛАКОМ ================= */
-db.collection("employees").onSnapshot(
-  { includeMetadataChanges: true },
-  (snapshot) => {
-    employeesCache = [];
-    snapshot.forEach((doc) => {
-      employeesCache.push({ ...doc.data(), id: doc.id });
-    });
-    const fromCache = snapshot.metadata?.fromCache === true;
-    employeesReady = !fromCache || employeesCache.length > 0;
-    employeesLoadFailed = false;
-    if (
-      registeredEmployee &&
-      employeesCache.some((employee) => employee.id === registeredEmployee.id)
-    ) {
-      registeredEmployee = null;
-    }
-    const user = currentUser();
-    if (user && (employeeSession.legacy || !employeeSession.id))
-      setSession(user);
-    if (!user && employeeSession && !fromCache) clearSession();
-    renderEmployees();
-    renderTable();
-    updateAuthUI();
-    updateAdminEmployeeSelects();
-  },
-  () => {
-    employeesLoadFailed = true;
-    updateAuthUI();
-  },
-);
+db.collection("employees").onSnapshot((snapshot) => {
+  employeesCache = [];
+  snapshot.forEach((doc) => {
+    employeesCache.push({ id: doc.id, ...doc.data() });
+  });
+  renderEmployees();
+  renderTable();
+  updateAuthUI();
+  updateAdminEmployeeSelects();
+});
 
 db.collection("logs")
   .orderBy("ts", "desc")
@@ -255,9 +189,7 @@ document
   });
 
 /* ================= АВТОРИЗАЦИЯ ================= */
-document.getElementById("reg-btn").addEventListener("click", async (event) => {
-  const button = event.currentTarget;
-  if (button.disabled) return;
+document.getElementById("reg-btn").addEventListener("click", async () => {
   const name = document.getElementById("reg-name").value.trim();
   const p1 = document.getElementById("reg-pass").value;
   const p2 = document.getElementById("reg-pass2").value;
@@ -265,12 +197,6 @@ document.getElementById("reg-btn").addEventListener("click", async (event) => {
 
   if (name.length < 2) {
     msg.textContent = "⚠️ Введите имя и фамилию.";
-    return;
-  }
-  if (!employeesReady) {
-    msg.textContent = employeesLoadFailed
-      ? "Не удалось загрузить список сотрудников. Обновите страницу."
-      : "Подождите, пока загрузится список сотрудников.";
     return;
   }
   if (employeesCache.some((e) => e.name.toLowerCase() === name.toLowerCase())) {
@@ -286,25 +212,21 @@ document.getElementById("reg-btn").addEventListener("click", async (event) => {
     return;
   }
 
-  button.disabled = true;
-  msg.textContent = "Создаём профиль…";
-  const employee = { name, pass: p1, regDate: fmtDate(new Date()) };
   try {
-    const { id } = await db.collection("employees").add(employee);
-    const account = { id, name, regDate: employee.regDate };
-    // The write can complete before the employee appears in the list listener.
-    if (!employeesCache.some((entry) => entry.id === id))
-      registeredEmployee = account;
-    setSession(account);
+    await db.collection("employees").add({
+      name: name,
+      pass: p1,
+      regDate: fmtDate(new Date()),
+    });
+    setSession(name);
     msg.textContent = "";
     ["reg-name", "reg-pass", "reg-pass2"].forEach(
       (i) => (document.getElementById(i).value = ""),
     );
+    updateAuthUI();
     switchTab("auth");
   } catch (e) {
     msg.textContent = "❌ Ошибка регистрации: " + e.message;
-  } finally {
-    button.disabled = false;
   }
 });
 
@@ -316,36 +238,21 @@ document.getElementById("login-btn").addEventListener("click", () => {
   const emp = employeesCache.find(
     (e) => e.name.toLowerCase() === name.toLowerCase(),
   );
-  if (!emp && !employeesReady) {
-    msg.textContent = employeesLoadFailed
-      ? "Не удалось загрузить список сотрудников. Обновите страницу."
-      : "Подождите, пока загрузится список сотрудников.";
-    return;
-  }
   if (!emp || emp.pass !== pass) {
     msg.textContent = "❌ Неверное имя или пароль.";
     return;
   }
-  setSession(emp);
+  setSession(emp.name);
   msg.textContent = "";
   document.getElementById("login-name").value = "";
   document.getElementById("login-pass").value = "";
+  updateAuthUI();
   switchTab("auth");
 });
 
 function updateAuthUI() {
   const user = currentUser();
-  const restoring = Boolean(employeeSession) && !user;
-  const restoreStatus = document.getElementById("auth-restore-status");
-  restoreStatus.classList.toggle("hidden", !restoring);
-  if (restoring) {
-    restoreStatus.textContent = employeesLoadFailed
-      ? "Не удалось загрузить профиль. Проверьте подключение и обновите страницу."
-      : "Восстанавливаем вход в профиль…";
-  }
-  document
-    .getElementById("auth-forms")
-    .classList.toggle("hidden", Boolean(user) || restoring);
+  document.getElementById("auth-forms").classList.toggle("hidden", !!user);
   document.getElementById("logged-view").classList.toggle("hidden", !user);
   const canScan = Boolean(user) && !adminOpen;
   scanDock.classList.toggle("hidden", !canScan);
@@ -1091,4 +998,3 @@ if (adminOpen) {
   const lastTab = sessionStorage.getItem(SS_ACTIVE_TAB);
   switchTab(lastTab === "auth" ? "auth" : "admin");
 }
-updateAuthUI();
