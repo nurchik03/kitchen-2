@@ -17,9 +17,9 @@ const QR_ENTRANCE = "KITCHEN_DOOR_IN";
 const QR_EXIT = "KITCHEN_DOOR_OUT";
 const ADMIN_PASS = "admin123";
 
-const LS_SESSION = "kitchen_session_v1";
-const SS_ADMIN = "kitchen_admin_open_v1";
-const SS_ACTIVE_TAB = "kitchen_active_tab_v1";
+const LS_SESSION = `kitchen_session_v1:${firebaseConfig.projectId}`;
+const SS_ADMIN = `kitchen_admin_open_v1:${firebaseConfig.projectId}`;
+const SS_ACTIVE_TAB = `kitchen_active_tab_v1:${firebaseConfig.projectId}`;
 const COOLDOWN_MS = 8000;
 
 let employeesCache = [];
