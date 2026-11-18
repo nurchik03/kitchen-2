@@ -1,12 +1,12 @@
 /* ================= НАСТРОЙКА FIREBASE ================= */
 const firebaseConfig = {
-  apiKey: "AIzaSyBlQjEaTNs7dHjmzZphzU4TdqDoBOtXIJw",
-  authDomain: "kitchen-app-8ab79.firebaseapp.com",
-  projectId: "kitchen-app-8ab79",
-  storageBucket: "kitchen-app-8ab79.firebasestorage.app",
-  messagingSenderId: "610956700538",
-  appId: "1:610956700538:web:e356316c6ee5a9ca3c44c3",
-  measurementId: "G-6PR2V1ZD1E",
+  apiKey: "AIzaSyALaCOklGT_9_zYN18y7SmwyknIDHODl4w",
+  authDomain: "kitchen-2-566a4.firebaseapp.com",
+  projectId: "kitchen-2-566a4",
+  storageBucket: "kitchen-2-566a4.firebasestorage.app",
+  messagingSenderId: "1025958925236",
+  appId: "1:1025958925236:web:13b9c3b10adbcea3b218e1",
+  measurementId: "G-M3NK5648H9"
 };
 
 firebase.initializeApp(firebaseConfig);
