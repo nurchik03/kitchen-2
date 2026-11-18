@@ -17,33 +17,92 @@ const QR_ENTRANCE = "KITCHEN_DOOR_IN";
 const QR_EXIT = "KITCHEN_DOOR_OUT";
 const ADMIN_PASS = "admin123";
 
-const LS_SESSION = `kitchen_session_v1:${firebaseConfig.projectId}`;
-const SS_ADMIN = `kitchen_admin_open_v1:${firebaseConfig.projectId}`;
-const SS_ACTIVE_TAB = `kitchen_active_tab_v1:${firebaseConfig.projectId}`;
+const LS_SESSION_LEGACY = `kitchen_session_v1:${firebaseConfig.projectId}`;
+const LS_SESSION = `kitchen_session_v2:${firebaseConfig.projectId}`;
+const ADMIN_STATE_KEY = `kitchen_admin_open_v1:${firebaseConfig.projectId}`;
+const ACTIVE_TAB_KEY = `kitchen_active_tab_v1:${firebaseConfig.projectId}`;
 const COOLDOWN_MS = 8000;
+const EMPLOYEES_LOAD_TIMEOUT_MS = 4000;
 
 let employeesCache = [];
+let employeesReady = false;
+let employeesLoadFailed = false;
+let employeesLoadSlow = false;
+let employeesLoadTimer;
+let unsubscribeEmployees;
+let registeredEmployee = null;
 let logsCache = [];
 let announcementsCache = [];
-let adminOpen = sessionStorage.getItem(SS_ADMIN) === "true";
+let adminOpen = readBrowserState(ADMIN_STATE_KEY) === "true";
+let employeeSession = readEmployeeSession();
 
 /* ================= РАБОТА С СЕССИЕЙ ================= */
-function getSession() {
+function readBrowserState(key) {
+  for (const storage of ["sessionStorage", "localStorage"]) {
+    try {
+      const value = window[storage].getItem(key);
+      if (value !== null) return value;
+    } catch {
+      // Use the available storage if the browser blocks one of them.
+    }
+  }
+  return null;
+}
+
+function persistBrowserState(key, value) {
   try {
-    return JSON.parse(localStorage.getItem(LS_SESSION));
+    localStorage.setItem(key, value);
   } catch {
-    return null;
+    try {
+      sessionStorage.setItem(key, value);
+    } catch {
+      // The current page remains usable when storage is disabled.
+    }
+    return;
+  }
+  try {
+    sessionStorage.removeItem(key);
+  } catch {
+    // The current value is already stored in localStorage.
   }
 }
-function setSession(name) {
-  localStorage.setItem(LS_SESSION, JSON.stringify({ name }));
+
+function readEmployeeSession() {
+  for (const key of [LS_SESSION, LS_SESSION_LEGACY]) {
+    const value = readBrowserState(key);
+    if (value === null) continue;
+    try {
+      const session = JSON.parse(value);
+      if (session === null && key === LS_SESSION) return null;
+      if (typeof session?.name === "string" && session.name) {
+        return { ...session, legacy: key === LS_SESSION_LEGACY };
+      }
+    } catch {
+      // Ignore malformed saved session data.
+    }
+  }
+  return null;
 }
+
+function setSession(employee) {
+  employeeSession = { id: employee.id, name: employee.name };
+  persistBrowserState(LS_SESSION, JSON.stringify(employeeSession));
+}
+
 function clearSession() {
-  localStorage.removeItem(LS_SESSION);
+  employeeSession = null;
+  registeredEmployee = null;
+  // Remember that this site no longer has a session, even if an old shared key remains.
+  persistBrowserState(LS_SESSION, JSON.stringify(employeeSession));
 }
+
 function currentUser() {
-  const s = getSession();
-  return s ? employeesCache.find((e) => e.name === s.name) || null : null;
+  if (!employeeSession) return null;
+  const { id, name } = employeeSession;
+  const user = employeesCache.find((employee) =>
+    id ? employee.id === id : employee.name === name,
+  );
+  return user ?? (registeredEmployee?.id === id ? registeredEmployee : null);
 }
 
 /* ================= УТИЛИТЫ ================= */
@@ -98,16 +157,48 @@ function calculateEmployeeHours(empName, targetDateStr) {
 }
 
 /* ================= СИНХРОНИЗАЦИЯ С ОБЛАКОМ ================= */
-db.collection("employees").onSnapshot((snapshot) => {
-  employeesCache = [];
-  snapshot.forEach((doc) => {
-    employeesCache.push({ id: doc.id, ...doc.data() });
-  });
-  renderEmployees();
-  renderTable();
+function listenForEmployees() {
+  unsubscribeEmployees?.();
+  clearTimeout(employeesLoadTimer);
+  employeesLoadTimer = undefined;
+  employeesLoadFailed = false;
+  employeesLoadSlow = false;
   updateAuthUI();
-  updateAdminEmployeeSelects();
-});
+
+  unsubscribeEmployees = db.collection("employees").onSnapshot(
+    { includeMetadataChanges: true },
+    (snapshot) => {
+      employeesCache = [];
+      snapshot.forEach((doc) => {
+        employeesCache.push({ ...doc.data(), id: doc.id });
+      });
+      const fromCache = snapshot.metadata?.fromCache === true;
+      employeesReady = !fromCache || employeesCache.length > 0;
+      if (
+        registeredEmployee &&
+        employeesCache.some((employee) => employee.id === registeredEmployee.id)
+      ) {
+        registeredEmployee = null;
+      }
+      const user = currentUser();
+      if (user && (employeeSession.legacy || !employeeSession.id)) {
+        setSession(user);
+      }
+      if (!fromCache) {
+        if (!user && employeeSession) clearSession();
+      }
+      // Resolve the profile before updating the employee and journal tables.
+      updateAuthUI();
+      renderEmployees();
+      renderTable();
+      updateAdminEmployeeSelects();
+    },
+    () => {
+      employeesLoadFailed = true;
+      updateAuthUI();
+    },
+  );
+}
 
 db.collection("logs")
   .orderBy("ts", "desc")
@@ -137,7 +228,7 @@ db.collection("announcements")
 
 /* ================= НАВИГАЦИЯ ================= */
 function switchTab(id) {
-  sessionStorage.setItem(SS_ACTIVE_TAB, id);
+  persistBrowserState(ACTIVE_TAB_KEY, id);
   document
     .querySelectorAll(".tab")
     .forEach((b) => b.classList.toggle("active", b.dataset.tab === id));
@@ -189,7 +280,9 @@ document
   });
 
 /* ================= АВТОРИЗАЦИЯ ================= */
-document.getElementById("reg-btn").addEventListener("click", async () => {
+document.getElementById("reg-btn").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  if (button.disabled) return;
   const name = document.getElementById("reg-name").value.trim();
   const p1 = document.getElementById("reg-pass").value;
   const p2 = document.getElementById("reg-pass2").value;
@@ -197,6 +290,10 @@ document.getElementById("reg-btn").addEventListener("click", async () => {
 
   if (name.length < 2) {
     msg.textContent = "⚠️ Введите имя и фамилию.";
+    return;
+  }
+  if (!employeesReady) {
+    msg.textContent = employeesLoadMessage();
     return;
   }
   if (employeesCache.some((e) => e.name.toLowerCase() === name.toLowerCase())) {
@@ -212,21 +309,25 @@ document.getElementById("reg-btn").addEventListener("click", async () => {
     return;
   }
 
+  button.disabled = true;
+  msg.textContent = "Создаём профиль…";
+  const employee = { name, pass: p1, regDate: fmtDate(new Date()) };
   try {
-    await db.collection("employees").add({
-      name: name,
-      pass: p1,
-      regDate: fmtDate(new Date()),
-    });
-    setSession(name);
+    const { id } = await db.collection("employees").add(employee);
+    const account = { id, name, regDate: employee.regDate };
+    // The write can complete before the employee appears in the list listener.
+    if (!employeesCache.some((entry) => entry.id === id))
+      registeredEmployee = account;
+    setSession(account);
     msg.textContent = "";
     ["reg-name", "reg-pass", "reg-pass2"].forEach(
       (i) => (document.getElementById(i).value = ""),
     );
-    updateAuthUI();
     switchTab("auth");
   } catch (e) {
     msg.textContent = "❌ Ошибка регистрации: " + e.message;
+  } finally {
+    button.disabled = false;
   }
 });
 
@@ -238,21 +339,59 @@ document.getElementById("login-btn").addEventListener("click", () => {
   const emp = employeesCache.find(
     (e) => e.name.toLowerCase() === name.toLowerCase(),
   );
+  if (!emp && !employeesReady) {
+    msg.textContent = employeesLoadMessage();
+    return;
+  }
   if (!emp || emp.pass !== pass) {
     msg.textContent = "❌ Неверное имя или пароль.";
     return;
   }
-  setSession(emp.name);
+  setSession(emp);
   msg.textContent = "";
   document.getElementById("login-name").value = "";
   document.getElementById("login-pass").value = "";
-  updateAuthUI();
   switchTab("auth");
 });
 
+function employeesLoadMessage() {
+  return employeesLoadFailed || employeesLoadSlow
+    ? "Не удалось загрузить список сотрудников. Проверьте интернет и нажмите «Повторить загрузку»."
+    : "Подождите, пока загрузится список сотрудников.";
+}
+
 function updateAuthUI() {
   const user = currentUser();
-  document.getElementById("auth-forms").classList.toggle("hidden", !!user);
+  const restoring = Boolean(employeeSession) && !user;
+  const waitingForData = !user && (restoring || !employeesReady);
+  if (!waitingForData || employeesLoadFailed) {
+    clearTimeout(employeesLoadTimer);
+    employeesLoadTimer = undefined;
+    if (!waitingForData) employeesLoadSlow = false;
+  } else if (!employeesLoadSlow && employeesLoadTimer === undefined) {
+    employeesLoadTimer = setTimeout(() => {
+      employeesLoadTimer = undefined;
+      employeesLoadSlow = true;
+      updateAuthUI();
+    }, EMPLOYEES_LOAD_TIMEOUT_MS);
+  }
+  const needsRetry =
+    waitingForData && (employeesLoadFailed || employeesLoadSlow);
+  const waiting = restoring && !needsRetry;
+  document
+    .getElementById("auth-restore")
+    .classList.toggle("hidden", !restoring && !needsRetry);
+  document.getElementById("auth-restore-status").textContent = waiting
+    ? "Восстанавливаем вход в профиль…"
+    : restoring
+      ? "Профиль пока не загрузился. Вход сохранён и восстановится при подключении к базе."
+      : employeesLoadMessage();
+  document
+    .getElementById("auth-restore-retry")
+    .classList.toggle("hidden", !needsRetry);
+  document
+    .getElementById("auth-forms")
+    .classList.toggle("hidden", Boolean(user) || waiting);
   document.getElementById("logged-view").classList.toggle("hidden", !user);
   const canScan = Boolean(user) && !adminOpen;
   scanDock.classList.toggle("hidden", !canScan);
@@ -547,7 +686,7 @@ function tryAdminUnlock() {
 
   if (inputPass === ADMIN_PASS) {
     adminOpen = true;
-    sessionStorage.setItem(SS_ADMIN, "true");
+    persistBrowserState(ADMIN_STATE_KEY, "true");
     document.getElementById("admin-pass").value = "";
     document.getElementById("admin-lock").classList.add("hidden");
     document.getElementById("admin-content").classList.remove("hidden");
@@ -564,14 +703,19 @@ function tryAdminUnlock() {
   }
 }
 
-document.getElementById("admin-lock-btn").addEventListener("click", () => {
+function lockAdmin() {
   adminOpen = false;
-  sessionStorage.removeItem(SS_ADMIN);
+  persistBrowserState(ADMIN_STATE_KEY, "false");
   document.getElementById("admin-tab").classList.add("hidden");
   document.getElementById("admin-lock").classList.remove("hidden");
   document.getElementById("admin-content").classList.add("hidden");
 
   switchTab("auth");
+}
+
+document.getElementById("admin-lock-btn").addEventListener("click", lockAdmin);
+window.addEventListener("storage", (event) => {
+  if (adminOpen && event.key === ADMIN_STATE_KEY && event.newValue !== "true") lockAdmin();
 });
 
 /* ================= ОБЪЯВЛЕНИЯ ================= */
@@ -993,8 +1137,18 @@ function buildDoorQr() {
 
 buildDoorQr();
 
+document.getElementById("auth-restore-retry").addEventListener("click", () => {
+  document.getElementById("auth-msg").textContent = "";
+  listenForEmployees();
+});
+window.addEventListener("online", () => {
+  if (employeesLoadFailed || employeesLoadSlow) listenForEmployees();
+});
+listenForEmployees();
+
 if (adminOpen) {
   document.getElementById("admin-tab").classList.remove("hidden");
-  const lastTab = sessionStorage.getItem(SS_ACTIVE_TAB);
+  const lastTab = readBrowserState(ACTIVE_TAB_KEY);
+  persistBrowserState(ADMIN_STATE_KEY, "true");
   switchTab(lastTab === "auth" ? "auth" : "admin");
 }
